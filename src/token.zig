@@ -1,8 +1,18 @@
 const std = @import("std");
 
+pub const TokenError = enum {
+    None,
+    UnclosedStringLiteral,
+    UnexpectedCharacter,
+    InvalidEscapeCharacter,
+    UnclosedCharLiteral,
+    InvalidCharLiteral,
+};
+
 pub const TokenType = union(enum) {
     NONE_TOKEN,
-
+    EOF,
+    ERR: TokenError,
     // keywords (alphabetical)
     And,
     Break,
@@ -18,6 +28,7 @@ pub const TokenType = union(enum) {
     For,
     If,
     Import,
+    Inline,
     Null,
     OrElse,
     Or,
@@ -31,83 +42,57 @@ pub const TokenType = union(enum) {
     While,
 
     // immediates
-    Comment: []const u8,
-    Identifier: []const u8,
-    ImmediateInteger: struct { slice: []const u8, parsed_value: u64, negative: bool, base: u8 },
-    ImmediateFloat: struct { slice: []const u8, parsed_value: f64 },
-    ImmediateString: []const u8,
-    ImmediateChar: []const u8,
+    Comment,
+    Identifier,
+    ImmediateInteger,
+    ImmediateFloat,
+    ImmediateString,
+    ImmediateChar,
 
     // operators (grouped lexicographically by chars)
     Amp,
-
     Asterisk,
     MulEquals,
-
     BackSlash,
-
     Colon,
-
     Comma,
-
     Dot,
     Slice,
-
     Equals,
     EqualsEquals,
-
     Exclam,
     NotEquals,
-
     ForwardSlash,
     DivEquals,
-
     GreaterThan,
     GreaterThanOrEquals,
     RShift,
     RShiftEquals,
-
     Hat,
-
     LBrace,
-
     LBracket,
-
     LessThan,
     LessThanOrEquals,
     LShift,
     LShiftEquals,
-
     LParenth,
-
     Minus,
     MinusEquals,
-
     Percent,
     ModEquals,
-
     Pipe,
-
     Plus,
     PlusEquals,
-
     Question,
-
     RBrace,
-
     RBracket,
-
     RParenth,
-
     Semicolon,
-
     Tilde,
 };
 
 pub const TokenInfo = struct {
-    file: []const u8,
-    line: u32,
-    column: u32,
+    slice: []const u8,
 };
 
 pub const Token = struct {
@@ -122,21 +107,19 @@ pub const TokenizerError = error{
 pub const Tokenizer = struct {
     original_string: []const u8,
     view: []const u8,
-    line: u32,
-    column: u32,
     filename: []const u8,
+    last_newline: usize,
 
     pub fn init(view: []const u8, file: []const u8) @This() {
         return .{
             .original_string = view,
             .view = view,
-            .line = 1,
-            .column = 1,
             .filename = file,
+            .last_newline = 0,
         };
     }
 
-    pub fn next(this: *@This()) TokenizerError!?Token {
+    pub fn next(this: *@This()) ?Token {
         if (this.view.len == 0) return null;
 
         this.skip_whitespace();
@@ -153,7 +136,7 @@ pub const Tokenizer = struct {
             return imm;
         }
 
-        return TokenizerError.InvalidTokenInStream;
+        return Token{ .type = .{ .ERR = .UnexpectedCharacter }, .info = .{ .slice = &.{} } };
     }
 
     fn skip_whitespace(this: *@This()) void {
@@ -166,10 +149,7 @@ pub const Tokenizer = struct {
             }
 
             if (this.view[index] == '\n') {
-                this.line += 1;
-                this.column = 1;
-            } else {
-                this.column += 1;
+                this.last_newline = @as(usize, @intFromPtr(this.view.ptr)) - @as(usize, @intFromPtr(this.original_string.ptr));
             }
         }
         this.view = this.view[index..];
@@ -192,6 +172,7 @@ pub const Tokenizer = struct {
             .{ .expect = "for", .result = .For },
             .{ .expect = "if", .result = .If },
             .{ .expect = "import", .result = .Import },
+            .{ .expect = "inline", .result = .Inline },
             .{ .expect = "null", .result = .Null },
             .{ .expect = "orelse", .result = .OrElse },
             .{ .expect = "or", .result = .Or },
@@ -220,9 +201,7 @@ pub const Tokenizer = struct {
             return Token{
                 .type = pair.result,
                 .info = .{
-                    .column = this.column,
-                    .line = this.line,
-                    .file = this.filename,
+                    .slice = this.view[0..len],
                 },
             };
         }
@@ -297,11 +276,9 @@ pub const Tokenizer = struct {
         defer this.column = 0;
 
         return Token{
-            .type = .{ .Comment = this.view[0 .. index + 1] },
+            .type = .Comment,
             .info = .{
-                .column = this.column,
-                .line = this.line,
-                .file = this.filename,
+                .slice = this.view[0 .. index + 1],
             },
         };
     }
@@ -334,86 +311,44 @@ pub const Tokenizer = struct {
         defer this.column += index;
         return Token{
             .info = .{
-                .column = this.column,
-                .line = this.line,
-                .file = this.filename,
+                .slice = this.view[0..index],
             },
-            .type = .{
-                .Identifier = this.view[0..index],
-            },
+            .type = .Identifier,
         };
     }
 
     fn imm_result_hex(this: *@This(), end: usize) ?Token {
-        const parsed_value: u64 = std.fmt.parseUnsigned(u64, this.view[0..end], 0) catch return null;
         return Token{
             .info = .{
-                .column = this.column,
-                .file = this.filename,
-                .line = this.line,
+                .slice = this.view[0..end],
             },
-            .type = .{
-                .ImmediateInteger = .{
-                    .slice = this.view[0..end],
-                    .base = 16,
-                    .negative = false,
-                    .parsed_value = parsed_value,
-                },
-            },
+            .type = .ImmediateInteger,
         };
     }
     fn imm_result_bin(this: *@This(), end: usize) ?Token {
-        const parsed_value: u64 = std.fmt.parseUnsigned(u64, this.view[0..end], 0) catch return null;
         return Token{
             .info = .{
-                .column = this.column,
-                .line = this.line,
-                .file = this.filename,
+                .slice = this.view[0..end],
             },
-            .type = .{
-                .ImmediateInteger = .{
-                    .slice = this.view[0..end],
-                    .base = 2,
-                    .negative = false,
-                    .parsed_value = parsed_value,
-                },
-            },
+            .type = .ImmediateInteger,
         };
     }
     // will return float or int depending on if view[0..end] has a decimal
     fn imm_result_dec(this: *@This(), end: usize) ?Token {
         const slice = this.view[0..end];
         if (std.mem.indexOfScalar(u8, slice, '.')) {
-            const parsed_value = std.fmt.parseFloat(f64, slice) catch return null;
             return Token{
                 .info = .{
-                    .column = this.column,
-                    .line = this.line,
-                    .file = this.filename,
+                    .slice = slice,
                 },
-                .type = .{
-                    .ImmediateFloat = .{
-                        .slice = slice,
-                        .parsed_value = parsed_value,
-                    },
-                },
+                .type = .ImmediateFloat,
             };
         }
-        const parsed_value = std.fmt.parseInt(u64, slice, 0) catch return null;
         return Token{
             .info = .{
-                .column = this.column,
-                .line = this.line,
-                .file = this.filename,
+                .slice = slice,
             },
-            .type = .{
-                .ImmediateInteger = .{
-                    .slice = slice,
-                    .base = 10,
-                    .negative = false,
-                    .parsed_value = parsed_value,
-                },
-            },
+            .type = .ImmediateInteger,
         };
     }
 
@@ -500,7 +435,6 @@ pub const Tokenizer = struct {
             }
 
             if (fmt.result(this, start)) |token| {
-                this.column += start;
                 return token;
             }
             return null;
@@ -508,54 +442,113 @@ pub const Tokenizer = struct {
 
         return null;
     }
+    const AllowedEscapeCharacters = [_]u8{ 'n', 't', 'r', '\'', '"', '\\', '\n', '0' };
+    const EscapeCharacter = '\\';
+
     fn parse_string(this: *@This()) ?Token {
-        const allowedEscapeCharacters = [_]u8{ 'n', 't', 'r', '\'', '"', '\\', '0' };
-        const escapeCharacter = '\\';
         const terminalCharacter = '"';
 
         if (this.view[0] != terminalCharacter) return null;
 
         var index: usize = 1;
 
-        const errmessage: []const u8 = ErrorBlock: {
+        const errtype: TokenError = ErrorBlock: {
             while (index < this.view.len) : (index += 1) {
                 if (this.view[index] == terminalCharacter) {
                     break;
                 }
 
-                if (this.view[index] == escapeCharacter) {
+                if (this.view[index] == EscapeCharacter) {
                     index += 1;
-                    if (index > this.view.len) break :ErrorBlock "Unclosed string literal";
-                    if (!std.mem.indexOfScalar(u8, allowedEscapeCharacters, this.view[index])) {
-                        break :ErrorBlock "Invalid escape character";
+                    if (index >= this.view.len) break :ErrorBlock .UnclosedStringLiteral;
+                    if (!std.mem.indexOfScalar(u8, AllowedEscapeCharacters, this.view[index])) {
+                        break :ErrorBlock .InvalidEscapeCharacter;
+                    }
+
+                    if (this.view[index] == '\n') {
+                        this.last_newline = (@as(usize, @intFromPtr(this.view.ptr)) + index) - @as(usize, @intFromPtr(this.original_string.ptr));
                     }
 
                     continue;
                 }
+
+                if (this.view[index] == '\n') {
+                    break :ErrorBlock .UnclosedStringLiteral;
+                }
             } else {
-                break :ErrorBlock "Unclosed string literal";
+                break :ErrorBlock .UnclosedStringLiteral;
             }
 
             std.debug.assert(this.view[0] == terminalCharacter and this.view[index] == terminalCharacter);
             index += 1;
 
-            defer this.column += index;
             return Token{
                 .info = .{
-                    .column = this.column,
-                    .line = this.line,
-                    .file = this.filename,
+                    .slice = this.view[0..index],
                 },
-                .type = .{
-                    .ImmediateString = this.view[0..index],
-                },
+                .type = .ImmediateString,
             };
         };
 
-        std.debug.print("Error on line {}, column {}: {s}\n", .{ this.line, this.column, errmessage });
-        return null;
+        return Token{
+            .info = .{ .slice = this.view },
+            .type = .{ .ERR = errtype },
+        };
     }
-    fn parse_char(this: *@This()) ?Token {}
+    fn parse_char(this: *@This()) ?Token {
+        const terminalCharacter = '\'';
+
+        if (this.view[0] != terminalCharacter) return null;
+
+        var index: usize = 1;
+        var count: usize = 0;
+        const errtype: TokenError = ErrorBlock: {
+            while (index < this.view.len) : (index += 1) {
+                if (this.view[index] == terminalCharacter) {
+                    break;
+                }
+                if (count > 1) {
+                    break :ErrorBlock .InvalidCharLiteral;
+                }
+
+                if (this.view[index] == EscapeCharacter) {
+                    index += 1;
+                    if (index >= this.view.len) break :ErrorBlock .UnclosedCharLiteral;
+                    if (!std.mem.indexOfScalar(u8, AllowedEscapeCharacters, this.view[index])) {
+                        break :ErrorBlock .InvalidEscapeCharacter;
+                    }
+
+                    if (this.view[index] == '\n') {
+                        this.last_newline = (@as(usize, @intFromPtr(this.view.ptr)) + index) - @as(usize, @intFromPtr(this.original_string.ptr));
+                    }
+
+                    count += 1;
+
+                    continue;
+                }
+
+                if (this.view[index] == '\n') {
+                    break :ErrorBlock .UnclosedCharLiteral;
+                }
+                count += 1;
+            } else {
+                break :ErrorBlock .UnclosedCharLiteral;
+            }
+
+            std.debug.assert(this.view[0] == terminalCharacter and this.view[index] == terminalCharacter);
+            index += 1;
+
+            return Token{
+                .info = .{ .slice = this.view[0..index] },
+                .type = .ImmediateChar,
+            };
+        };
+
+        return Token{
+            .info = .{ .slice = this.view },
+            .type = .{ .ERR = errtype },
+        };
+    }
 
     inline fn parse_immediate(this: *@This()) ?Token {
         if (this.parse_comment()) |tok| return tok;
@@ -564,5 +557,18 @@ pub const Tokenizer = struct {
         if (this.parse_string()) |tok| return tok;
         if (this.parse_char()) |tok| return tok;
         return null;
+    }
+
+    pub fn calculate_line(this: Tokenizer) usize {
+        var line: usize = 1;
+        var offset: usize = this.last_newline;
+
+        while (offset > 0) : (offset -= 1) {
+            if (this.view[offset] == '\n') {
+                line += 1;
+            }
+        }
+
+        return line;
     }
 };
